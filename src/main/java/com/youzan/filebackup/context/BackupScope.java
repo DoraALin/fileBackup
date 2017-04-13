@@ -31,7 +31,6 @@ public class BackupScope {
 
     //TODO resources need shutdown
     private final ExecutorService writeExec = Executors.newSingleThreadExecutor();
-    private final ScheduledExecutorService readExec = Executors.newSingleThreadScheduledExecutor();
 
     private final Path parent;
     //initialize with default backup scope config
@@ -168,48 +167,51 @@ public class BackupScope {
     public boolean openWrite() throws IOException {
         if(state.get() != Status.INIT.ordinal())
             return false;
+        if(this.write)
+            return true;
+        synchronized(syncWriteChannel) {
+            //for write
+            BackupLocation writeStartBackupFileLoc = metaData.getWriteStart();
+            Path writeBackupFilePath = this.parent.resolve(this.scopeId).resolve(String.format(SCOPE_BACKUP_FILE_NAME, writeStartBackupFileLoc.getBackupFileIndex()));
+            boolean shouldRecordMaxSize = false;
+            if (Files.exists(writeBackupFilePath))
+                shouldRecordMaxSize = true;
 
-        //for write
-        BackupLocation writeStartBackupFileLoc = metaData.getWriteStart();
-        Path writeBackupFilePath = this.parent.resolve(this.scopeId).resolve(String.format(SCOPE_BACKUP_FILE_NAME, writeStartBackupFileLoc.getBackupFileIndex()));
-        boolean shouldRecordMaxSize = false;
-        if(Files.exists(writeBackupFilePath))
-            shouldRecordMaxSize = true;
-
-        try {
-            writeFileChannel = FileChannel.open(writeBackupFilePath, StandardOpenOption.READ, StandardOpenOption.WRITE, StandardOpenOption.CREATE);
-            long position = writeFileChannel.position();
-            if(shouldRecordMaxSize) {
-                logger.info("Record current position {} in existing backup file for writing.", position);
-                writeFileChannel.position(0);
-                ByteBuffer maxSizeBuf = ByteBuffer.allocateDirect(BackupScopeConfig.BACKUP_FILE_MAX_SIZE_IN_BYTE);
-                writeFileChannel.read(maxSizeBuf);
-                this.writeFileMaxSize = maxSizeBuf.getLong();
-                maxSizeBuf.clear();
-                writeFileChannel.position(position);
-                logger.info("Current backup file max size, for write {}", this.writeFileMaxSize);
-            }else{
-                //write max size in config into new created backup file
-                ByteBuffer maxSizeBuf = ByteBuffer.allocateDirect(BackupScopeConfig.BACKUP_FILE_MAX_SIZE_IN_BYTE);
-                maxSizeBuf.putLong(this.config.getBackupFileMaxByte());
-                maxSizeBuf.flip();
-                writeFileChannel.write(maxSizeBuf);
-                this.writeFileMaxSize = this.config.getBackupFileMaxByte();
-                maxSizeBuf.clear();
-                updateEnd(BackupScopeConfig.BACKUP_FILE_MAX_SIZE_IN_BYTE);
-                logger.info("Write max backup file size {} into newly created file.", this.config.getBackupFileMaxByte());
+            try {
+                writeFileChannel = FileChannel.open(writeBackupFilePath, StandardOpenOption.READ, StandardOpenOption.WRITE, StandardOpenOption.CREATE);
+                long position = writeFileChannel.position();
+                if (shouldRecordMaxSize) {
+                    logger.info("Record current position {} in existing backup file for writing.", position);
+                    writeFileChannel.position(0);
+                    ByteBuffer maxSizeBuf = ByteBuffer.allocateDirect(BackupScopeConfig.BACKUP_FILE_MAX_SIZE_IN_BYTE);
+                    writeFileChannel.read(maxSizeBuf);
+                    this.writeFileMaxSize = maxSizeBuf.getLong();
+                    maxSizeBuf.clear();
+                    writeFileChannel.position(position);
+                    logger.info("Current backup file max size, for write {}", this.writeFileMaxSize);
+                } else {
+                    //write max size in config into new created backup file
+                    ByteBuffer maxSizeBuf = ByteBuffer.allocateDirect(BackupScopeConfig.BACKUP_FILE_MAX_SIZE_IN_BYTE);
+                    maxSizeBuf.putLong(this.config.getBackupFileMaxByte());
+                    maxSizeBuf.flip();
+                    writeFileChannel.write(maxSizeBuf);
+                    this.writeFileMaxSize = this.config.getBackupFileMaxByte();
+                    maxSizeBuf.clear();
+                    updateEnd(BackupScopeConfig.BACKUP_FILE_MAX_SIZE_IN_BYTE);
+                    logger.info("Write max backup file size {} into newly created file.", this.config.getBackupFileMaxByte());
+                }
+            } catch (IOException e) {
+                logger.error("Fail to open write backup file {}.", writeBackupFilePath, e);
+                state.set(Status.INVALID.ordinal());
+                throw e;
             }
-        } catch (IOException e) {
-            logger.error("Fail to open write backup file {}.", writeBackupFilePath, e);
-            state.set(Status.INVALID.ordinal());
-            throw e;
-        }
 
-        updateWriteLock();
-        logger.info("Backup file {} open for write.", writeBackupFilePath);
-        //update status
-        this.write = true;
-        return this.write;
+            updateWriteLock();
+            logger.info("Backup file {} open for write.", writeBackupFilePath);
+            //update status
+            this.write = true;
+            return this.write;
+        }
     }
 
     private void updateWriteLock() throws IOException {
@@ -231,40 +233,52 @@ public class BackupScope {
         }
     }
 
-    public synchronized void closeRead() throws IOException {
-        if(!couldRead()) {
-            logger.info("Backup read is already closed.");
-            return;
-        }
-        try{
-            read = false;
-            this.readFileChannel.close();
-            logger.info("Backup file {} closed.", this.metaData.getReadStart());
-            //persist meta data file
-            this.metaData.commitMetaFile();
-        } catch (IOException e) {
-            logger.error("Fail to close backup file {}.", this.metaData.getReadStart(), e);
-        } finally {
-            if(this.readLock.isValid())
-                this.readLock.release();
+    public void closeRead() throws IOException {
+        synchronized(syncReadChannel) {
+            if (!couldRead()) {
+                logger.info("Backup read is already closed.");
+                return;
+            }
+            try {
+                read = false;
+                this.readFileChannel.close();
+                logger.info("Backup file {} closed.", this.metaData.getReadStart());
+                //persist meta data file
+                this.metaData.commitMetaFile();
+            } catch (IOException e) {
+                logger.error("Fail to close backup file {}.", this.metaData.getReadStart(), e);
+            } finally {
+                if (this.readLock.isValid())
+                    this.readLock.release();
+            }
         }
     }
 
-    public synchronized void closeWrite() throws IOException {
-        if(!couldWrite()) {
-            logger.info("Backup write is already closed.");
-            return;
-        }
-        try {
+    public void closeWrite() throws IOException{
+        synchronized (syncWriteChannel) {
+            if (!couldWrite()) {
+                logger.info("Backup write is already closed.");
+                return;
+            }
             write = false;
-            this.writeFileChannel.close();
-            logger.info("Backup file {} closed.", this.metaData.getWriteStart());
-            this.metaData.commitMetaFile();
-        } catch (IOException e) {
-            logger.error("Fail to close backup file {}.", this.metaData.getWriteStart(), e);
-        } finally {
-            if(this.writeLock.isValid())
-                this.writeLock.release();
+            //stop write async loop
+            this.writeExec.shutdown();
+            try {
+                this.writeExec.awaitTermination(this.config.getWriteExecutorTerminationAwaitTimeoutInSecond(), TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                logger.error("Thread interrupted waiting for write executor exit.");
+            }
+
+            try {
+                this.writeFileChannel.close();
+                logger.info("Backup file {} closed.", this.metaData.getWriteStart());
+                this.metaData.commitMetaFile();
+            } catch (IOException e) {
+                logger.error("Fail to close backup file {}.", this.metaData.getWriteStart(), e);
+            } finally {
+                if (this.writeLock.isValid())
+                    this.writeLock.release();
+            }
         }
     }
 
@@ -426,7 +440,7 @@ public class BackupScope {
      * @param contents bytes array to write
      * @return byte write count
      */
-    public synchronized int tryWrite(final byte[] contents) throws IOException {
+    public int tryWrite(final byte[] contents) throws IOException {
         synchronized (syncWriteChannel){
             if(!couldWrite() && !openWrite())
                 return 0;
@@ -470,7 +484,7 @@ public class BackupScope {
 
     /**
      * Async write to backup file, function answers with {@link Future<Integer>} for future byte count.
-     * @param contents
+     * @param contents content to write to backup file
      * @return  future
      * @throws RejectedExecutionException
      */
