@@ -185,6 +185,7 @@ public class BackupScope {
                     writeFileChannel.position(0);
                     ByteBuffer maxSizeBuf = ByteBuffer.allocateDirect(BackupScopeConfig.BACKUP_FILE_MAX_SIZE_IN_BYTE);
                     writeFileChannel.read(maxSizeBuf);
+                    maxSizeBuf.flip();
                     this.writeFileMaxSize = maxSizeBuf.getLong();
                     maxSizeBuf.clear();
                     writeFileChannel.position(position);
@@ -369,12 +370,14 @@ public class BackupScope {
         }
         ByteBuffer maxSizeBuf = ByteBuffer.allocateDirect(BackupScopeConfig.BACKUP_FILE_MAX_SIZE_IN_BYTE);
         readFileChannel.read(maxSizeBuf);
-        maxSizeBuf.position(0);
+        maxSizeBuf.flip();
         this.readFileMaxSize = maxSizeBuf.getLong();
         logger.info("Set backup file max size {} for {}", this,readFileMaxSize, readBackupFilePath);
         maxSizeBuf.clear();
 
-        long newReadOffset = readStartBackupFileLoc.getBackupFileOffset() + BackupScopeConfig.BACKUP_FILE_MAX_SIZE_IN_BYTE;
+        long newReadOffset = readStartBackupFileLoc.getBackupFileOffset();
+        if(newReadOffset == 0)
+            newReadOffset += BackupScopeConfig.BACKUP_FILE_MAX_SIZE_IN_BYTE;
         //update read start
         metaData.setReadStart(new BackupLocation(readStartBackupFileLoc.getBackupFileIndex(), newReadOffset));
 

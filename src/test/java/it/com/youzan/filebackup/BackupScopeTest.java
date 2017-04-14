@@ -81,6 +81,44 @@ public class BackupScopeTest {
         clear(Paths.get("src/test/resources/testRandomWriteAndRead"));
     }
 
+    @Test
+    public void testWriteContinue() throws IOException {
+        BackupScopeConfig config = new BackupScopeConfig();
+        config.setBackupFileMaxByte(1000);
+        BackupScope aScope = BackupScopeBuilder.create("src/test/resources/", "testWriteContinue")
+                .setBackupContext(new DefaultBackupContext("testWriteContinue"))
+                .setBackupScopeConfig(config)
+                .build();
+        aScope.init();
+        aScope.openRead();
+        aScope.openWrite();
+
+        for(int i = 0; i < 100; i++){
+            aScope.tryWrite("this content".getBytes(Charset.defaultCharset()));
+        }
+
+        aScope.closeRead();
+        aScope.closeWrite();
+
+        //open write/read again
+        aScope = BackupScopeBuilder.create("src/test/resources/", "testWriteContinue")
+                .setBackupContext(new DefaultBackupContext("testWriteContinue"))
+                .setBackupScopeConfig(config)
+                .build();
+        aScope.init();
+        aScope.openRead();
+        aScope.openWrite();
+        for(int i = 0; i < 100; i++){
+            byte[] content = aScope.tryRead();
+            Assert.assertNotNull(content);
+        }
+        byte[] content = aScope.tryRead();
+        Assert.assertNull(content);
+        aScope.closeRead();
+        aScope.closeWrite();
+        clear(Paths.get("src/test/resources/testWriteContinue"));
+    }
+
     private void clear(Path path) throws IOException {
         DirectoryDelete walk = new DirectoryDelete();
         EnumSet opts = EnumSet.of(FileVisitOption.FOLLOW_LINKS);
